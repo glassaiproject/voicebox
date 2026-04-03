@@ -1,0 +1,33 @@
+services:
+  voicebox:
+    image: ghcr.io/glassaiproject/voicebox:latest
+    container_name: voicebox
+    restart: unless-stopped
+
+    ports:
+      - "127.0.0.1:17493:17493"
+
+    volumes:
+      - ./output:/app/data/generations
+      - voicebox-data:/app/data
+      - huggingface-cache:/home/voicebox/.cache/huggingface
+
+    environment:
+      - LOG_LEVEL=info
+
+    networks:
+      - voicebox-net
+
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 16G
+
+networks:
+  voicebox-net:
+    driver: bridge
+
+volumes:
+  voicebox-data:
+  huggingface-cache:

@@ -43,6 +43,12 @@ TADA_MODEL_REPOS = {
     "3B": TADA_3B_ML_REPO,
 }
 
+# ProgressManager/SSE keys must match ModelConfig.model_name in __init__.py (not tada-3b).
+TADA_SIZE_TO_REGISTRY_MODEL_NAME = {
+    "1B": "tada-1b",
+    "3B": "tada-3b-ml",
+}
+
 # Key weight files for cache detection
 _TADA_MODEL_WEIGHT_FILES = [
     "model.safetensors",
@@ -97,7 +103,9 @@ class HumeTadaBackend:
 
     def _load_model_sync(self, model_size: str = "1B"):
         """Synchronous model loading with progress tracking."""
-        model_name = f"tada-{model_size.lower()}"
+        model_name = TADA_SIZE_TO_REGISTRY_MODEL_NAME.get(
+            model_size, f"tada-{model_size.lower()}"
+        )
         is_cached = self._is_model_cached(model_size)
         repo = TADA_MODEL_REPOS.get(model_size, TADA_1B_REPO)
 

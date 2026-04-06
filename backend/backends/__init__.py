@@ -606,6 +606,30 @@ def get_stt_backend() -> STTBackend:
     return _stt_backend
 
 
+def unload_all_models() -> dict[str, object]:
+    """Unload every instantiated TTS backend and Whisper if loaded."""
+    from ..services import transcribe
+
+    unloaded_tts: list[str] = []
+    with _tts_backends_lock:
+        engines = list(_tts_backends.keys())
+    for engine in engines:
+        backend = _tts_backends[engine]
+        if backend.is_loaded():
+            backend.unload_model()
+            unloaded_tts.append(engine)
+
+    whisper_unloaded = False
+    if _stt_backend is not None and _stt_backend.is_loaded():
+        transcribe.unload_whisper_model()
+        whisper_unloaded = True
+
+    return {
+        "tts_engines_unloaded": unloaded_tts,
+        "whisper_unloaded": whisper_unloaded,
+    }
+
+
 def reset_backends():
     """Reset backend instances (useful for testing)."""
     global _tts_backend, _tts_backends, _stt_backend

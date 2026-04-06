@@ -1,6 +1,7 @@
 """Model management endpoints."""
 
 import asyncio
+import logging
 import shutil
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from ..utils.progress import get_progress_manager
 from ..utils.tasks import get_task_manager
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _get_dir_size(path: Path) -> int:
@@ -48,14 +50,34 @@ def _copy_with_progress(src: Path, dst: Path, progress_manager, copied_so_far: i
 
 
 @router.post("/models/load")
-async def load_model(model_size: str = "1.7B"):
-    """Manually load TTS model."""
+async def load_model(model_size: str = "1.7B", model_name: str | None = None):
+    """Manually load TTS model.
+
+    If ``model_name`` is set, loads that registry model (any engine). Otherwise loads
+    the default Qwen backend with ``model_size`` (legacy behavior).
+    """
+    from ..backends import engine_has_model_sizes, get_model_config, load_engine_model
     from ..services import tts
 
     try:
+        if model_name:
+            cfg = get_model_config(model_name)
+            if not cfg:
+                raise HTTPException(status_code=400, detail=f"Unknown model: {model_name}")
+            if cfg.engine == "whisper":
+                raise HTTPException(
+                    status_code=400,
+                    detail="Whisper models are loaded via transcription endpoints",
+                )
+            size = cfg.model_size if engine_has_model_sizes(cfg.engine) else "default"
+            await load_engine_model(cfg.engine, size)
+            return {"message": f"Model {model_name} loaded successfully"}
+
         tts_model = tts.get_tts_model()
         await tts_model.load_model_async(model_size)
         return {"message": f"Model {model_size} loaded successfully"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -86,6 +108,49 @@ async def unload_model_by_name(model_name: str):
         if not was_loaded:
             return {"message": f"Model {model_name} is not loaded"}
         return {"message": f"Model {model_name} unloaded successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@router.post("/models/purge")
+async def purge_models_and_cache():
+    """Unload all models, clear voice prompt cache, and remove HF hub dirs for registered models."""
+    from huggingface_hub import constants as hf_constants
+
+    from ..backends import get_all_model_configs, unload_all_models
+    from ..utils.cache import clear_voice_prompt_cache
+
+    try:
+        unload_summary = unload_all_models()
+        voice_prompt_files_deleted = clear_voice_prompt_cache()
+
+        cache_root = Path(hf_constants.HF_HUB_CACHE)
+        seen_repos: set[str] = set()
+        hf_cache_repos_removed: list[str] = []
+        hf_cache_errors: list[str] = []
+
+        for cfg in get_all_model_configs():
+            if cfg.hf_repo_id in seen_repos:
+                continue
+            seen_repos.add(cfg.hf_repo_id)
+            repo_dir = cache_root / ("models--" + cfg.hf_repo_id.replace("/", "--"))
+            if not repo_dir.exists():
+                continue
+            try:
+                shutil.rmtree(repo_dir)
+                hf_cache_repos_removed.append(cfg.hf_repo_id)
+            except OSError as e:
+                msg = f"{cfg.hf_repo_id}: {e}"
+                logger.warning("Failed to remove HF cache dir %s: %s", repo_dir, e)
+                hf_cache_errors.append(msg)
+
+        return {
+            "message": "Purge completed",
+            "unload": unload_summary,
+            "voice_prompt_files_deleted": voice_prompt_files_deleted,
+            "hf_cache_repos_removed": hf_cache_repos_removed,
+            "hf_cache_errors": hf_cache_errors,
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 

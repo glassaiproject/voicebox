@@ -54,6 +54,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy installed Python packages from builder stage
@@ -69,8 +70,8 @@ COPY --from=frontend --chown=voicebox:voicebox /build/web/dist /app/frontend/
 RUN mkdir -p /app/data/generations /app/data/profiles /app/data/cache \
     && chown -R voicebox:voicebox /app/data
 
-# Switch to non-root user
-USER voicebox
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
 
 # Expose the API port
 EXPOSE 17493
@@ -79,5 +80,7 @@ EXPOSE 17493
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=60s \
     CMD curl -f http://localhost:17493/health || exit 1
 
-# Start the FastAPI server
+ENTRYPOINT ["/docker-entrypoint.sh"]
+
+# Start the FastAPI server (entrypoint drops to voicebox after fixing volume ownership)
 CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "17493"]

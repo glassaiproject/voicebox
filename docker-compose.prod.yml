@@ -14,6 +14,7 @@ services:
 
     environment:
       - LOG_LEVEL=info
+      - NUMBA_DISABLE_JIT=1
 
     networks:
       - voicebox-net

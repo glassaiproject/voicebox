@@ -15,7 +15,9 @@ causal LM generates speech via flow-matching diffusion.
 
 import asyncio
 import logging
+import os
 import threading
+from pathlib import Path
 from typing import ClassVar, List, Optional, Tuple
 
 import numpy as np
@@ -49,14 +51,40 @@ TADA_SIZE_TO_REGISTRY_MODEL_NAME = {
     "3B": "tada-3b-ml",
 }
 
-# Key weight files for cache detection
-_TADA_MODEL_WEIGHT_FILES = [
-    "model.safetensors",
-]
-
 _TADA_CODEC_WEIGHT_FILES = [
     "encoder/model.safetensors",
 ]
+
+
+def _tada_lm_weights_cached(repo: str) -> bool:
+    """True if TADA LM weights are on disk (single or sharded safetensors).
+
+    ``HumeAI/tada-1b`` ships ``model.safetensors``; ``HumeAI/tada-3b-ml`` uses
+    sharded files ``model-00001-of-00002.safetensors`` (no root ``model.safetensors``).
+    ``/models/status`` accepts any ``*.safetensors`` — this must match so streaming
+    does not 400 when the UI shows downloaded.
+    """
+    try:
+        from huggingface_hub import constants as hf_constants
+
+        cache_root = Path(os.environ.get("HF_HUB_CACHE", hf_constants.HF_HUB_CACHE))
+        repo_cache = cache_root / ("models--" + repo.replace("/", "--"))
+        snapshots_dir = repo_cache / "snapshots"
+        if not snapshots_dir.exists():
+            return False
+        blobs_dir = repo_cache / "blobs"
+        if blobs_dir.exists() and any(blobs_dir.glob("*.incomplete")):
+            return False
+        for p in snapshots_dir.rglob("*.safetensors"):
+            name = p.name
+            if name == "model.safetensors":
+                return True
+            if name.startswith("model-") and "-of-" in name and name.endswith(".safetensors"):
+                return True
+        return False
+    except Exception as e:
+        logger.warning("Error checking TADA LM cache for %s: %s", repo, e)
+        return False
 
 
 class HumeTadaBackend:
@@ -84,7 +112,7 @@ class HumeTadaBackend:
 
     def _is_model_cached(self, model_size: str = "1B") -> bool:
         repo = TADA_MODEL_REPOS.get(model_size, TADA_1B_REPO)
-        model_cached = is_model_cached(repo, required_files=_TADA_MODEL_WEIGHT_FILES)
+        model_cached = _tada_lm_weights_cached(repo)
         codec_cached = is_model_cached(TADA_CODEC_REPO, required_files=_TADA_CODEC_WEIGHT_FILES)
         return model_cached and codec_cached
 

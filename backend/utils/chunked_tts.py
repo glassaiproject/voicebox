@@ -11,7 +11,7 @@ overhead.
 
 import logging
 import re
-from typing import List, Tuple
+from typing import AsyncIterator, List, Tuple
 
 import numpy as np
 
@@ -297,3 +297,74 @@ async def generate_chunked(
 
     audio = concatenate_audio_chunks(audio_chunks, sample_rate, crossfade_ms=crossfade_ms)
     return audio, sample_rate
+
+
+async def iter_generate_chunked(
+    backend,
+    text: str,
+    voice_prompt: dict,
+    language: str = "en",
+    seed: int | None = None,
+    instruct: str | None = None,
+    max_chunk_chars: int = DEFAULT_MAX_CHUNK_CHARS,
+    trim_fn=None,
+) -> AsyncIterator[Tuple[np.ndarray, int]]:
+    """Yield ``(audio, sample_rate)`` for each text chunk.
+
+    Same splitting and per-chunk generation as :func:`generate_chunked`, but
+    does **not** concatenate or crossfade. Callers stream each chunk
+    independently (e.g. length-prefixed WAV frames).
+    """
+    chunks = split_text_into_chunks(text, max_chunk_chars)
+
+    if len(chunks) <= 1:
+        audio, sample_rate = await backend.generate(
+            text,
+            voice_prompt,
+            language,
+            seed,
+            instruct,
+        )
+        if trim_fn is not None:
+            audio = trim_fn(audio, sample_rate)
+        yield np.asarray(audio, dtype=np.float32), sample_rate
+        return
+
+    logger.info(
+        "Streaming %d chars in %d chunks (max %d chars each)",
+        len(text),
+        len(chunks),
+        max_chunk_chars,
+    )
+    sample_rate: int | None = None
+
+    for i, chunk_text in enumerate(chunks):
+        logger.info(
+            "Generating stream chunk %d/%d (%d chars)",
+            i + 1,
+            len(chunks),
+            len(chunk_text),
+        )
+        chunk_seed = (seed + i) if seed is not None else None
+
+        chunk_audio, chunk_sr = await backend.generate(
+            chunk_text,
+            voice_prompt,
+            language,
+            chunk_seed,
+            instruct,
+        )
+        if trim_fn is not None:
+            chunk_audio = trim_fn(chunk_audio, chunk_sr)
+
+        if sample_rate is None:
+            sample_rate = chunk_sr
+        elif chunk_sr != sample_rate:
+            logger.warning(
+                "Sample rate mismatch in stream chunk %d: %s vs %s",
+                i,
+                chunk_sr,
+                sample_rate,
+            )
+
+        yield np.asarray(chunk_audio, dtype=np.float32), chunk_sr

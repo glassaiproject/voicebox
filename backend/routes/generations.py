@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import struct
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -18,6 +19,10 @@ from ..services.task_queue import enqueue_generation
 from ..utils.tasks import get_task_manager
 
 router = APIRouter()
+
+# Length-prefixed WAV frames: repeated ``uint32`` LE (byte length of following WAV) + raw WAV bytes.
+# ``crossfade_ms`` does not apply between frames; trimming per text chunk matches :func:`generate_chunked`.
+WAV_CHUNK_STREAM_MEDIA_TYPE = "application/vnd.voicebox.wav-chunk-stream"
 
 
 def _resolve_generation_engine(data: models.GenerationRequest, profile) -> str:
@@ -311,4 +316,96 @@ async def stream_speech(
         _wav_stream(),
         media_type="audio/wav",
         headers={"Content-Disposition": 'attachment; filename="speech.wav"'},
+    )
+
+
+@router.post("/generate/stream/chunks")
+async def stream_speech_chunks(
+    data: models.GenerationRequest,
+    db: Session = Depends(get_db),
+):
+    """Generate speech and stream one WAV per text chunk (length-prefixed frames).
+
+    Emits bytes as each chunk is synthesized so clients can play incrementally.
+    Effects and normalize are applied per chunk (loudness may differ slightly
+    from a single full-buffer normalize).
+    """
+    from ..backends import get_tts_backend_for_engine, ensure_model_cached_or_raise, load_engine_model, engine_needs_trim
+
+    profile = await profiles.get_profile(data.profile_id, db)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    engine = _resolve_generation_engine(data, profile)
+    try:
+        profiles.validate_profile_engine(profile, engine)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    tts_model = get_tts_backend_for_engine(engine)
+    model_size = data.model_size or "1.7B"
+
+    from ..utils.chunked_tts import iter_generate_chunked
+
+    trim_fn = None
+    if engine_needs_trim(engine):
+        from ..utils.audio import trim_tts_output
+
+        trim_fn = trim_tts_output
+
+    effects_chain_config = None
+    if data.effects_chain is not None:
+        effects_chain_config = [e.model_dump() for e in data.effects_chain]
+    elif profile.effects_chain:
+        import json as _json
+
+        try:
+            effects_chain_config = _json.loads(profile.effects_chain)
+        except Exception:
+            effects_chain_config = None
+
+    voice_prompt = await profiles.create_voice_prompt_for_profile(
+        data.profile_id,
+        db,
+        engine=engine,
+    )
+
+    async def _framed_wav_stream():
+        try:
+            # Defer model load until after response headers are sent so upstream
+            # fetch/proxy is not blocked on download + weight load (often logged as 0–100%).
+            await ensure_model_cached_or_raise(engine, model_size)
+            await load_engine_model(engine, model_size)
+
+            async for audio, sample_rate in iter_generate_chunked(
+                tts_model,
+                data.text,
+                voice_prompt,
+                language=data.language,
+                seed=data.seed,
+                instruct=data.instruct,
+                max_chunk_chars=data.max_chunk_chars,
+                trim_fn=trim_fn,
+            ):
+                if effects_chain_config:
+                    from ..utils.effects import apply_effects
+
+                    audio = apply_effects(audio, sample_rate, effects_chain_config)
+
+                if data.normalize:
+                    from ..utils.audio import normalize_audio
+
+                    audio = normalize_audio(audio)
+
+                wav_bytes = tts.audio_to_wav_bytes(audio, sample_rate)
+                # One chunk per frame so ASGI sends a single body chunk (avoids tiny 4-byte stall).
+                payload = struct.pack("<I", len(wav_bytes)) + wav_bytes
+                yield payload
+                await asyncio.sleep(0)
+        except (BrokenPipeError, ConnectionResetError, asyncio.CancelledError):
+            logger.debug("Client disconnected during audio chunk stream")
+
+    return StreamingResponse(
+        _framed_wav_stream(),
+        media_type=WAV_CHUNK_STREAM_MEDIA_TYPE,
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

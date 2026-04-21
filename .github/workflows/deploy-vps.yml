@@ -29,3 +29,8 @@ jobs:
             fi
             docker compose -f docker-compose.prod.yml pull
             docker compose -f docker-compose.prod.yml up -d
+            # Repair volume ownership (idempotent; helps stale root-owned HF cache from older runs)
+            docker compose -f docker-compose.prod.yml exec -T -u root voicebox \
+              chown -R voicebox:voicebox /home/voicebox/.cache/huggingface /app/data
+            docker compose -f docker-compose.prod.yml exec -T -u root voicebox \
+              ls -ldn /home/voicebox/.cache/huggingface /app/data

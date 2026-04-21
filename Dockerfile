@@ -33,11 +33,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip install --no-cache-dir --upgrade pip
 
-COPY backend/requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+# CPU image: PyPI "torch" is CUDA (+ nvidia-*). Resolve torch/torchaudio from PyTorch CPU index
+# first; everything else from PyPI via --extra-index-url (single install avoids CUDA re-resolve).
+COPY backend/requirements.txt /tmp/requirements.txt
+RUN sed -e '/^torch[>=<]/d' -e '/^torch[[:space:]]/d' -e '/^torchaudio/d' /tmp/requirements.txt \
+      > /tmp/requirements-notorch.txt && \
+    pip install --no-cache-dir --prefix=/install -r /tmp/requirements-notorch.txt \
+      --index-url https://download.pytorch.org/whl/cpu \
+      --extra-index-url https://pypi.org/simple && \
+    rm -f /tmp/requirements.txt /tmp/requirements-notorch.txt
 RUN pip install --no-cache-dir --prefix=/install --no-deps chatterbox-tts
 RUN pip install --no-cache-dir --prefix=/install --no-deps hume-tada
-RUN pip install --no-cache-dir --prefix=/install \
+# GitHub tree overwrites PyPI qwen-tts; --no-deps avoids duplicating torch/gradio/etc. already in /install
+# (full deps would re-download ~GB and often hit Docker disk limits during this layer).
+RUN pip install --no-cache-dir --prefix=/install --no-deps \
     git+https://github.com/QwenLM/Qwen3-TTS.git
 
 

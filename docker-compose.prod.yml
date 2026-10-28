@@ -14,7 +14,8 @@ services:
 
     environment:
       - LOG_LEVEL=info
-      - NUMBA_DISABLE_JIT=1
+      # Disabling JIT breaks librosa (guvectorize); give numba a writable cache instead.
+      - NUMBA_CACHE_DIR=/tmp/numba_cache
 
     networks:
       - voicebox-net

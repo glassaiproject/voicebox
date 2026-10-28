@@ -79,6 +79,11 @@ COPY --from=frontend --chown=voicebox:voicebox /build/web/dist /app/frontend/
 RUN mkdir -p /app/data/generations /app/data/profiles /app/data/cache \
     && chown -R voicebox:voicebox /app/data
 
+# librosa's numba functions are compiled with cache=True. site-packages isn't
+# writable for the voicebox user, and ~/.cache can be root-owned when a volume
+# is mounted below it, so give numba a cache dir it can always write.
+ENV NUMBA_CACHE_DIR=/tmp/numba_cache
+
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 

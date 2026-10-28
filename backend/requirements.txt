@@ -29,6 +29,9 @@ diffusers>=0.29.0
 omegaconf
 pykakasi
 resemble-perth>=1.0.1
+# resemble-perth imports pkg_resources, which setuptools 82 removed; without it
+# perth.PerthImplicitWatermarker is None and Chatterbox fails to load.
+setuptools<82
 s3tokenizer
 spacy-pkuseg
 pyloudnorm

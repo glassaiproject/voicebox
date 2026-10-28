@@ -4,6 +4,8 @@ if [ "$(id -u)" = "0" ]; then
   HF_CACHE="/home/voicebox/.cache/huggingface"
   DATA_DIR="/app/data"
   mkdir -p "$HF_CACHE" "$DATA_DIR"
+  # Docker creates ~/.cache as root when it mounts the HF volume below it.
+  chown voicebox:voicebox /home/voicebox/.cache
   if ! chown -R voicebox:voicebox "$HF_CACHE" "$DATA_DIR"; then
     echo "docker-entrypoint: ERROR: chown failed for $HF_CACHE and $DATA_DIR" >&2
     exit 1

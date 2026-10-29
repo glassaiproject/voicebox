@@ -308,8 +308,8 @@ async def iter_generate_chunked(
     instruct: str | None = None,
     max_chunk_chars: int = DEFAULT_MAX_CHUNK_CHARS,
     trim_fn=None,
-) -> AsyncIterator[Tuple[np.ndarray, int]]:
-    """Yield ``(audio, sample_rate)`` for each text chunk.
+) -> AsyncIterator[Tuple[str, np.ndarray, int]]:
+    """Yield ``(chunk_text, audio, sample_rate)`` for each text chunk.
 
     Same splitting and per-chunk generation as :func:`generate_chunked`, but
     does **not** concatenate or crossfade. Callers stream each chunk
@@ -327,7 +327,7 @@ async def iter_generate_chunked(
         )
         if trim_fn is not None:
             audio = trim_fn(audio, sample_rate)
-        yield np.asarray(audio, dtype=np.float32), sample_rate
+        yield text.strip(), np.asarray(audio, dtype=np.float32), sample_rate
         return
 
     logger.info(
@@ -367,4 +367,4 @@ async def iter_generate_chunked(
                 sample_rate,
             )
 
-        yield np.asarray(chunk_audio, dtype=np.float32), chunk_sr
+        yield chunk_text, np.asarray(chunk_audio, dtype=np.float32), chunk_sr

@@ -89,6 +89,10 @@ class GenerationRequest(BaseModel):
     effects_chain: Optional[List["EffectConfig"]] = Field(
         None, description="Effects chain to apply after generation (overrides profile default)"
     )
+    timings: bool = Field(
+        default=False,
+        description="/generate/stream/chunks only: also send JSON frames with each chunk's text and word timings",
+    )
 
 
 class GenerationResponse(BaseModel):

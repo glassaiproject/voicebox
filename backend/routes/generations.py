@@ -22,7 +22,18 @@ router = APIRouter()
 
 # Length-prefixed WAV frames: repeated ``uint32`` LE (byte length of following WAV) + raw WAV bytes.
 # ``crossfade_ms`` does not apply between frames; trimming per text chunk matches :func:`generate_chunked`.
+# With ``timings`` the stream also carries JSON frames (same length prefix, body starts with ``{``):
+# ``{"type": "chunk", "text": ...}`` right before each WAV frame, and after it
+# ``{"type": "words", "words": [[start_char, end_char, start_sec, end_sec], ...]}``
+# for that chunk once alignment finishes (omitted when no aligner is available).
 WAV_CHUNK_STREAM_MEDIA_TYPE = "application/vnd.voicebox.wav-chunk-stream"
+
+
+def _json_frame(payload: dict) -> bytes:
+    import json as _json
+
+    body = _json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return struct.pack("<I", len(body)) + body
 
 
 def _resolve_generation_engine(data: models.GenerationRequest, profile) -> str:
@@ -369,6 +380,11 @@ async def stream_speech_chunks(
         engine=engine,
     )
 
+    if data.timings:
+        from ..utils.word_alignment import align_words, warm_up
+
+        warm_up()
+
     async def _framed_wav_stream():
         try:
             # Defer model load until after response headers are sent so upstream
@@ -376,7 +392,7 @@ async def stream_speech_chunks(
             await ensure_model_cached_or_raise(engine, model_size)
             await load_engine_model(engine, model_size)
 
-            async for audio, sample_rate in iter_generate_chunked(
+            async for chunk_text, audio, sample_rate in iter_generate_chunked(
                 tts_model,
                 data.text,
                 voice_prompt,
@@ -399,8 +415,16 @@ async def stream_speech_chunks(
                 wav_bytes = tts.audio_to_wav_bytes(audio, sample_rate)
                 # One chunk per frame so ASGI sends a single body chunk (avoids tiny 4-byte stall).
                 payload = struct.pack("<I", len(wav_bytes)) + wav_bytes
+                if data.timings:
+                    payload = _json_frame({"type": "chunk", "text": chunk_text}) + payload
                 yield payload
                 await asyncio.sleep(0)
+
+                if data.timings:
+                    # Sent after the audio so alignment never delays playback.
+                    words = await align_words(chunk_text, audio, sample_rate)
+                    if words:
+                        yield _json_frame({"type": "words", "words": words})
         except (BrokenPipeError, ConnectionResetError, asyncio.CancelledError):
             logger.debug("Client disconnected during audio chunk stream")
 

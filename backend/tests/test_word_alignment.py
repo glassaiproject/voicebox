@@ -22,13 +22,27 @@ def _log_probs_for(path):
     return lp
 
 
-def test_tokenize_words_keeps_spans_and_drops_unspeakable_chars():
-    words = tokenize_words("Hi, it's 2026 [laugh] now", VOCAB)
-    assert [(s, e) for s, e, _ in words] == [(0, 3), (4, 8), (9, 13), (14, 21), (22, 25)]
-    assert words[0][2] == [VOCAB["H"], VOCAB["I"]]
-    assert words[1][2] == [VOCAB["I"], VOCAB["T"], VOCAB["'"], VOCAB["S"]]
-    assert words[2][2] == []  # digits: interpolated later
-    assert words[3][2] == []  # paralinguistic tag
+def test_spell_number():
+    from backend.utils.word_alignment import spell_number
+
+    assert spell_number("2026,") == "twenty twenty six"
+    assert spell_number("1905") == "nineteen oh five"
+    assert spell_number("2005") == "two thousand five"
+    assert spell_number("42") == "forty two"
+    assert spell_number("1,250") == "one thousand two hundred fifty"
+    assert spell_number("3.14") == "three point one four"
+    assert spell_number("50%") == "fifty percent"
+    assert spell_number("$5") == "five dollars"
+    assert spell_number("hello") is None
+
+
+def test_tokenize_words_spells_numbers_and_delimits_words():
+    words, tokens = tokenize_words("Hi, it's 6 [laugh] now", VOCAB)
+    assert [(s, e) for s, e, _ in words] == [(0, 3), (4, 8), (9, 10), (11, 18), (19, 22)]
+    assert [n for _, _, n in words] == [2, 4, 3, 0, 3]  # "6" -> SIX; tag has no tokens
+    bar = VOCAB["|"]
+    assert tokens[:8] == [VOCAB["H"], VOCAB["I"], bar, VOCAB["I"], VOCAB["T"], VOCAB["'"], VOCAB["S"], bar]
+    assert tokens.count(bar) == 3
 
 
 def test_ctc_align_finds_token_frames():
@@ -43,12 +57,12 @@ def test_ctc_align_needs_enough_frames():
     assert ctc_align(lp, [VOCAB["H"], VOCAB["I"]], BLANK) is None
 
 
-def test_words_from_frames_interpolates_untimed_words():
-    words = tokenize_words("go 42 now", VOCAB)
-    # tokens: G O | N O W ; frame spans per token
-    spans = [(0, 1), (2, 3), (10, 11), (12, 12), (13, 14)]
-    timings = words_from_frames(words, spans, sec_per_frame=0.1, duration=2.0)
+def test_words_from_frames_skips_delimiters_and_interpolates_untimed_words():
+    words, tokens = tokenize_words("go ~ now", VOCAB)
+    assert tokens == [VOCAB["G"], VOCAB["O"], VOCAB["|"], VOCAB["N"], VOCAB["O"], VOCAB["W"]]
+    spans = [(0, 1), (2, 3), (4, 9), (10, 11), (12, 12), (13, 14)]
+    timings = words_from_frames(words, tokens, spans, 0.1, 2.0, VOCAB["|"])
     assert timings[0] == (0, 2, 0.0, 0.4)
-    assert timings[2] == (6, 9, 1.0, 1.5)
-    # "42" sits between "go" and "now"
-    assert timings[1] == (3, 5, 0.4, 1.0)
+    assert timings[2] == (5, 8, 1.0, 1.5)
+    # "~" has no tokens and sits between "go" and "now"
+    assert timings[1] == (3, 4, 0.4, 1.0)

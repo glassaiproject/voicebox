@@ -93,21 +93,86 @@ def _resample(audio: np.ndarray, sr: int) -> np.ndarray:
         return np.interp(x, np.arange(len(audio)), audio).astype(np.float32)
 
 
-def tokenize_words(text: str, vocab: dict) -> List[Tuple[int, int, List[int]]]:
-    """Split ``text`` into words with their char span and CTC token ids.
+_ONES = (
+    "zero one two three four five six seven eight nine ten eleven twelve thirteen "
+    "fourteen fifteen sixteen seventeen eighteen nineteen"
+).split()
+_TENS = "_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()
+_SCALES = ((10**9, "billion"), (10**6, "million"), (1000, "thousand"))
 
-    Characters the model can't emit (digits, symbols) are dropped, so a word
-    like "2026" gets no tokens and is timed by interpolation instead.
+
+def _cardinal(n: int) -> str:
+    if n < 20:
+        return _ONES[n]
+    if n < 100:
+        return _TENS[n // 10] + ("" if n % 10 == 0 else " " + _ONES[n % 10])
+    if n < 1000:
+        rest = n % 100
+        return _ONES[n // 100] + " hundred" + ("" if rest == 0 else " " + _cardinal(rest))
+    for scale, name in _SCALES:
+        if n >= scale:
+            rest = n % scale
+            return _cardinal(n // scale) + " " + name + ("" if rest == 0 else " " + _cardinal(rest))
+    return str(n)
+
+
+def spell_number(raw: str) -> Optional[str]:
+    """Spell the number in a word ("2026," -> "twenty twenty six"), or None.
+
+    TTS engines read numbers as words, and the CTC model has no digit tokens,
+    so numbers must be spelled out to be aligned. Four-digit numbers from 1100
+    to 2099 are read as years, the way TTS front ends usually do.
     """
-    words = []
+    m = re.fullmatch(r"[^\w$£€]*([$£€]?)(\d+(?:,\d{3})*)(?:\.(\d+))?(%|st|nd|rd|th|s)?[^\w]*", raw)
+    if not m:
+        return None
+    currency, whole, frac, suffix = m.groups()
+    digits = whole.replace(",", "")
+    if len(digits) > 12:
+        return None
+    n = int(digits)
+    if frac is None and "," not in whole and len(digits) == 4 and 1100 <= n <= 2099 and n % 100 != 0 and not 2000 <= n < 2010:
+        words = _cardinal(n // 100) + " " + (("oh " + _ONES[n % 100]) if n % 100 < 10 else _cardinal(n % 100))
+    else:
+        words = _cardinal(n)
+    if frac is not None:
+        words += " point " + " ".join(_ONES[int(d)] for d in frac)
+    if suffix == "%":
+        words += " percent"
+    if currency:
+        words += {"$": " dollars", "£": " pounds", "€": " euros"}[currency]
+    return words
+
+
+def tokenize_words(text: str, vocab: dict) -> Tuple[List[Tuple[int, int, int]], List[int]]:
+    """Split ``text`` into words and build the CTC token sequence.
+
+    Returns ``(words, tokens)`` where each word is ``(start_char, end_char,
+    token_count)`` and words are separated by the ``|`` delimiter in
+    ``tokens``. Numbers are spelled out; characters the model can't emit
+    are dropped, so such a word gets no tokens and is timed by interpolation.
+    """
+    delimiter = vocab.get("|")
+    words: List[Tuple[int, int, int]] = []
+    tokens: List[int] = []
     for m in _WORD_RE.finditer(text):
         raw = m.group(0)
         if _TAG_RE.match(raw):
-            ids: List[int] = []
+            spoken = ""
         else:
-            ids = [vocab[c] for c in raw.upper().replace("’", "'") if c in vocab and c != "|"]
-        words.append((m.start(), m.end(), ids))
-    return words
+            spoken = spell_number(raw) or raw
+        ids: List[int] = []
+        for part in spoken.split():
+            part_ids = [vocab[c] for c in part.upper().replace("’", "'") if c in vocab and c != "|"]
+            if part_ids:
+                if ids and delimiter is not None:
+                    ids.append(delimiter)
+                ids.extend(part_ids)
+        if ids and tokens and delimiter is not None:
+            tokens.append(delimiter)
+        tokens.extend(ids)
+        words.append((m.start(), m.end(), len(ids)))
+    return words, tokens
 
 
 def ctc_align(log_probs: np.ndarray, tokens: List[int], blank: int) -> Optional[List[Tuple[int, int]]]:
@@ -150,24 +215,28 @@ def ctc_align(log_probs: np.ndarray, tokens: List[int], blank: int) -> Optional[
 
 
 def words_from_frames(
-    words: List[Tuple[int, int, List[int]]],
+    words: List[Tuple[int, int, int]],
+    tokens: List[int],
     spans: List[Tuple[int, int]],
     sec_per_frame: float,
     duration: float,
+    delimiter: Optional[int] = None,
 ) -> List[WordTiming]:
     """Turn per-token frame spans into per-word timings.
 
-    Words without tokens (numbers, symbols, tags) are placed between their
-    timed neighbours.
+    Words without tokens (symbols, tags) are placed between their timed
+    neighbours.
     """
     out: List[Optional[List[float]]] = []
     k = 0
-    for _, _, ids in words:
-        if not ids:
+    for _, _, count in words:
+        if not count:
             out.append(None)
             continue
-        first, last = spans[k][0], spans[k + len(ids) - 1][1]
-        k += len(ids)
+        if k > 0 and delimiter is not None and tokens[k] == delimiter:
+            k += 1  # skip the word separator
+        first, last = spans[k][0], spans[k + count - 1][1]
+        k += count
         out.append([first * sec_per_frame, (last + 1) * sec_per_frame])
 
     i = 0
@@ -197,8 +266,7 @@ def _align_sync(text: str, audio: np.ndarray, sample_rate: int) -> Optional[List
     with _lock:
         model, processor = _model, _processor
     vocab = processor.tokenizer.get_vocab()
-    words = tokenize_words(text, vocab)
-    tokens = [i for _, _, ids in words for i in ids]
+    words, tokens = tokenize_words(text, vocab)
     if not tokens:
         return None
 
@@ -212,7 +280,9 @@ def _align_sync(text: str, audio: np.ndarray, sample_rate: int) -> Optional[List
     spans = ctc_align(log_probs, tokens, blank=processor.tokenizer.pad_token_id)
     if spans is None:
         return None
-    return words_from_frames(words, spans, duration / log_probs.shape[0], duration)
+    return words_from_frames(
+        words, tokens, spans, duration / log_probs.shape[0], duration, vocab.get("|")
+    )
 
 
 async def align_words(text: str, audio: np.ndarray, sample_rate: int) -> Optional[List[WordTiming]]:

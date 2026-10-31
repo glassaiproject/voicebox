@@ -221,6 +221,19 @@ curl -X POST http://localhost:17493/profiles \
 
 Full API documentation available at `http://localhost:17493/docs`.
 
+### Run the server in the background
+
+To run only the API server (no desktop app), use the venv from `just setup`:
+
+```bash
+bun run server:start     # background, logs in voicebox-server.log
+bun run server:status    # pid + /health
+bun run server:logs      # tail -f the log
+bun run server:stop
+```
+
+`scripts/server.sh` does the same without bun. On macOS, `bun run server:agent-install` adds a launchd agent so the server starts at login and restarts on crash; `server:agent-uninstall` removes it. `VOICEBOX_PORT` and `VOICEBOX_HOST` override the default `127.0.0.1:17493`.
+
 ---
 
 ## Tech Stack

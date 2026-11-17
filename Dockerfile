@@ -84,6 +84,13 @@ RUN mkdir -p /app/data/generations /app/data/profiles /app/data/cache \
 # is mounted below it, so give numba a cache dir it can always write.
 ENV NUMBA_CACHE_DIR=/tmp/numba_cache
 
+# torch sizes its CPU thread pool from the host's cores (8 on the prod VPS),
+# not the container's CPU limit (cpus: 4 in the compose files). Twice as many
+# threads as CPUs get throttled, and a two-word Chatterbox line took ~90 s.
+# Keep these equal to the compose cpus limit; override them there if it changes.
+ENV OMP_NUM_THREADS=4 \
+    MKL_NUM_THREADS=4
+
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 

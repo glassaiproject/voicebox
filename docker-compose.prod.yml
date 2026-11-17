@@ -16,6 +16,9 @@ services:
       - LOG_LEVEL=info
       # Disabling JIT breaks librosa (guvectorize); give numba a writable cache instead.
       - NUMBA_CACHE_DIR=/tmp/numba_cache
+      # torch threads = the cpus limit below (torch otherwise uses every host core)
+      - OMP_NUM_THREADS=4
+      - MKL_NUM_THREADS=4
 
     networks:
       - voicebox-net

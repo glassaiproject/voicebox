@@ -355,6 +355,10 @@ async def stream_speech_chunks(
     tts_model = get_tts_backend_for_engine(engine)
     model_size = data.model_size or "1.7B"
 
+    # Check before the response starts: raised inside the stream generator it
+    # reaches the client as an empty 200 instead of a 400 with the reason.
+    await ensure_model_cached_or_raise(engine, model_size)
+
     from ..utils.chunked_tts import iter_generate_chunked
 
     trim_fn = None
@@ -383,14 +387,16 @@ async def stream_speech_chunks(
     if data.timings:
         from ..utils.word_alignment import align_words, warm_up
 
-        warm_up()
-
     async def _framed_wav_stream():
         try:
             # Defer model load until after response headers are sent so upstream
-            # fetch/proxy is not blocked on download + weight load (often logged as 0–100%).
-            await ensure_model_cached_or_raise(engine, model_size)
+            # fetch/proxy is not blocked on weight load.
             await load_engine_model(engine, model_size)
+            if data.timings:
+                # Only after the TTS model is loaded: the aligner loads
+                # transformers in another thread, and importing it at the same
+                # time as Chatterbox breaks with "cannot import name 'LlamaModel'".
+                warm_up()
 
             async for chunk_text, audio, sample_rate in iter_generate_chunked(
                 tts_model,
